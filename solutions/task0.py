@@ -55,7 +55,7 @@ def main(csv_graph: str) -> list[list[int]]:
 
 
 # Чтение CSV файла
-with open('data/graph.csv', 'r') as file:
+with open('data/task0/graph.csv', 'r') as file:
     csv_content = file.read()
     print(csv_content)
 
