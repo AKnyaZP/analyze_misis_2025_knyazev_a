@@ -1,8 +1,3 @@
-"""
-Модуль для работы с нечеткой логикой и системой принятия решений.
-Реализует нечеткий вывод на основе правил и функций принадлежности.
-"""
-
 import json
 from typing import List, Tuple, Dict, Union, Any
 
@@ -337,29 +332,24 @@ def main(
 if __name__ == "__main__":
     import os
     
-    # Загрузка данных из файла
+    # Пути к файлам данных
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(script_dir, "../data/task4/data.json")
+    rules_path = os.path.join(script_dir, "../data/task4/rules.json")
     
     with open(data_path, "r", encoding="utf-8") as f:
         full_data = json.load(f)
     
-    # Правила нечеткого вывода
-    fuzzy_rules = [
-        ["холодно", "интенсивный"],
-        ["комфортно", "умеренный"],
-        ["жарко", "слабый"]
-    ]
+    with open(rules_path, "r", encoding="utf-8") as f:
+        fuzzy_rules = json.load(f)
     
-    # Тестирование
-    test_temperature = 21.0
+    input_temperature = int(input("Введите температуру в °C: "))
     
-    result = main(
+    optimal_s = main(
         temperature_data=full_data,
         heating_data=full_data,
         rules_data=fuzzy_rules,
-        current_temperature=test_temperature
+        current_temperature=input_temperature
     )
     
-    print(f"Текущая температура: {test_temperature}°C")
-    print(f"Рекомендуемый уровень нагрева: {result}")
+    print(f"Для температуры {input_temperature}°C оптимальное управление: {optimal_s:.2f}")
