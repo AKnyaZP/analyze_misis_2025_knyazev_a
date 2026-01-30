@@ -54,181 +54,174 @@ def _levels(clusters: List[List[str]], items: List[str]) -> List[int]:
     return lvl
 
 
-def _build_Y_strict(lvl: List[int]) -> np.ndarray:
-    """Build Y matrix using numpy for optimization.
-    Matrix where y[i,j] = 1 if pos[i] >= pos[j] (like build_matrix in new code).
-    Note: smaller level means earlier position, so lvl[i] <= lvl[j] means pos[i] >= pos[j]."""
+# --- Шаг 1: Построение матриц отношений Y (y_ij = 1 <=> объект i не строго позже j в ранжировке) ---
+def _build_Y(lvl: List[int]) -> np.ndarray:
+    """Матрица отношений: Y[i,j] = 1 если уровень i <= уровень j (т.е. i не позже j)."""
     n = len(lvl)
     lvl_arr = np.array(lvl)
-    valid_mask = lvl_arr >= 0
-    
-    i_indices = np.arange(n)[:, np.newaxis]
-    j_indices = np.arange(n)[np.newaxis, :]
-    
-    condition = (lvl_arr[i_indices] <= lvl_arr[j_indices]) & valid_mask[i_indices] & valid_mask[j_indices]
-    y = condition.astype(int)
-    
+    valid = lvl_arr >= 0
+    i_ = np.arange(n)[:, np.newaxis]
+    j_ = np.arange(n)[np.newaxis, :]
+    y = ((lvl_arr[i_] <= lvl_arr[j_]) & valid[i_] & valid[j_]).astype(np.int64)
     return y
 
 
-def _transpose(m: np.ndarray) -> np.ndarray:
-    """Transpose matrix using numpy."""
-    return m.T
+def _compose(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Композиция отношений: (A ◦ B)[i,j] = 1 если существует k: A[i,k]=1 и B[k,j]=1."""
+    return (A @ B > 0).astype(np.int64)
 
 
-def _and(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Element-wise AND using numpy."""
-    return (a & b).astype(int)
+def _or_mat(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Побитовое ИЛИ для 0/1 матриц."""
+    return (A | B).astype(np.int64)
 
 
-def _or(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Element-wise OR using numpy."""
-    return (a | b).astype(int)
-
-
-def _warshall(m: np.ndarray) -> np.ndarray:
-    """Floyd-Warshall algorithm for transitive closure using numpy."""
-    closure = m.copy()
-    n = len(closure)
-    
+# --- Алгоритм Уоршелла для транзитивного замыкания ---
+def _warshall(E: np.ndarray) -> np.ndarray:
+    """Транзитивное замыкание E* алгоритмом Уоршелла."""
+    closure = E.copy()
+    n = closure.shape[0]
     for k in range(n):
-        closure = closure | (closure[:, k:k+1] & closure[k:k+1, :])
-    
+        closure = closure | (closure[:, k : k + 1] @ closure[k : k + 1, :] > 0).astype(
+            np.int64
+        )
     return closure
 
 
-def _components_undirected(adj: np.ndarray) -> List[List[int]]:
-    """Find connected components using numpy-optimized BFS."""
-    n = len(adj)
-    used = np.zeros(n, dtype=bool)
+def _connected_components(adj: np.ndarray) -> List[List[int]]:
+    """Компоненты связности неориентированного графа (adj симметрична)."""
+    n = adj.shape[0]
+    visited = np.zeros(n, dtype=bool)
     comps: List[List[int]] = []
 
     for s in range(n):
-        if used[s]:
+        if visited[s]:
             continue
         q = deque([s])
-        used[s] = True
+        visited[s] = True
         comp = []
         while q:
             v = q.popleft()
             comp.append(v)
-            neighbors = np.where(adj[v, :] & ~used)[0]
-            for u in neighbors:
-                used[u] = True
-                q.append(u)
+            for u in range(n):
+                if adj[v, u] and not visited[u]:
+                    visited[u] = True
+                    q.append(u)
         comps.append(sorted(comp))
     return comps
 
 
-def _cluster_order(YA: np.ndarray, YB: np.ndarray, clusters: List[List[int]]) -> List[List[int]]:
-    """Order clusters using topological sort (recursive DFS)."""
+def _order_clusters_by_C(
+    C: np.ndarray, clusters: List[List[int]]
+) -> List[List[int]]:
+    """Упорядочивание кластеров по матрице согласованного порядка C (топологическая сортировка)."""
     m = len(clusters)
-    g = np.zeros((m, m), dtype=int)
-
+    # Граф порядка: кластер i < кластер j, если для каких-то a из i, b из j: C[a,b]=1 и не C[b,a]=1 или просто C[a,b]=1 и кластеры различаются
+    # Отношение: кластер i предшествует кластеру j, если для любых/некоторых представителей a из i, b из j выполняется C[a,b]=1 (согласованный порядок).
+    order_adj = np.zeros((m, m), dtype=int)
     for i in range(m):
         for j in range(m):
             if i == j:
                 continue
-            ok = False
+            # Есть ли дуга i -> j: существует a in clusters[i], b in clusters[j] с C[a,b]=1
             for a in clusters[i]:
                 for b in clusters[j]:
-                    if YA[a, b] and YB[a, b]:
-                        ok = True
+                    if C[a, b] == 1:
+                        order_adj[i, j] = 1
                         break
-                if ok:
+                if order_adj[i, j]:
                     break
-            g[i, j] = 1 if ok else 0
 
     visited = np.zeros(m, dtype=bool)
-    result_order = []
-    
-    def topological_sort(v):
+    result_order: List[int] = []
+
+    def dfs(v: int) -> None:
         visited[v] = True
         for u in range(m):
-            if g[v, u] == 1 and not visited[u]:
-                topological_sort(u)
+            if order_adj[v, u] and not visited[u]:
+                dfs(u)
         result_order.append(v)
-    
+
     for i in range(m):
         if not visited[i]:
-            topological_sort(i)
-    
+            dfs(i)
+
     result_order.reverse()
     return [clusters[i] for i in result_order]
 
 
-def _encode(items: List[str], clusters: List[List[int]]) -> List[Any]:
-    def cast(v: str):
-        return int(v) if v.isdigit() else v
-
-    out: List[Any] = []
-    for cl in clusters:
-        vals = [cast(items[i]) for i in cl]
-        if len(vals) == 1:
-            out.append(vals[0])
-        else:
-            out.append(vals)
-    return out
-
-
 def main(a_json: str, b_json: str) -> Dict[str, Any]:
-    """Main function that returns kernel and consistent_ranking like the new code."""
+    """
+    Построение согласованной кластерной ранжировки f(A, B) по алгоритму.
+    Возвращает: kernel (ядро противоречий S(A,B)), consistent_ranking (f(A,B)).
+    """
     A = _to_clusters(_loads_relaxed(a_json))
     B = _to_clusters(_loads_relaxed(b_json))
-
     items = _universe(A, B)
+    n = len(items)
 
     lvlA = _levels(A, items)
     lvlB = _levels(B, items)
 
-    YA = _build_Y_strict(lvlA)
-    YB = _build_Y_strict(lvlB)
+    # --- Шаг 1: Матрицы YA, YB и транспонированные ---
+    YA = _build_Y(lvlA)
+    YB = _build_Y(lvlB)
+    YA_T = YA.T
+    YB_T = YB.T
 
-    n = len(items)
+    # --- Шаг 2: Выявление противоречий ---
+    # Противоречие: эксперты расходятся — один считает i≼j, другой j≼i.
+    # YAB[i,j]=YA*YB (поэлементно): 1 если оба считают i≼j. YAB'[i,j]=Y'A*Y'B: 1 если оба j≼i.
+    # Пара (i,j) в ядре противоречий, если ни оба i≼j, ни оба j≼i — т.е. (YAB[i,j]==0 и YAB'[i,j]==0).
+    YAB = (YA * YB).astype(np.int64)
+    YAB_prime = (YA_T * YB_T).astype(np.int64)
+    # Матрица противоречий: P[i,j]=1 для пар, где есть противоречие (i≠j и оба произведения 0)
+    P = ((YAB == 0) & (YAB_prime == 0) & (np.arange(n)[:, None] != np.arange(n)[None, :])).astype(
+        np.int64
+    )
 
-    YAB = YA * YB
-    YA_T = _transpose(YA)
-    YB_T = _transpose(YB)
-    YAB_prime = YA_T * YB_T
+    # Ядро противоречий S(A,B) — пары объектов с p_ij = 1 (противоречивая пара), выводим как [i+1, j+1]
+    kernel: List[List[int]] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            if P[i, j] == 1:
+                kernel.append([i + 1, j + 1])
 
-    upper_triangle = np.triu(np.ones((n, n), dtype=bool), k=1)
-    kernel_mask = (YAB == 0) & (YAB_prime == 0) & upper_triangle
-    kernel_pairs = np.argwhere(kernel_mask)
-    kernel = [[int(i + 1), int(j + 1)] for i, j in kernel_pairs]
+    # --- Шаг 3: Согласованный порядок C = YA ◦ YB (согласованное отношение: оба говорят i≼j);
+    # в реализации: C = (YA * YB) поэлементно — оба эксперта согласны, что i не позже j.
+    # Для (i,j) ∈ S(A,B): c_ij = c_ji = 1 (объединяем противоречивые пары в один кластер). ---
+    C = (YA * YB).astype(np.int64)
+    for (i1, j1) in kernel:
+        i0, j0 = i1 - 1, j1 - 1
+        C[i0, j0] = 1
+        C[j0, i0] = 1
 
-    C = YA * YB
-
-    if kernel:
-        kernel_indices = np.array(kernel) - 1
-        C[kernel_indices[:, 0], kernel_indices[:, 1]] = 1
-        C[kernel_indices[:, 1], kernel_indices[:, 0]] = 1
-
-    E = C * C.T
-
+    # --- Шаг 4: Кластеры ---
+    # Матрица эквивалентности: E = C ◦ C^T — симметричная часть (i~j если C[i,j]=1 и C[j,i]=1)
+    E = (C * C.T).astype(np.int64)
     E_star = _warshall(E)
+    # Неориентированный граф для компонент связности: E* симметрична по смыслу (эквивалентность)
+    sym = E_star | E_star.T
+    clusters_indices = _connected_components(sym)
 
-    und = _or(E_star, _transpose(E_star))
-    
-    clusters = _components_undirected(und)
-    
-    if not clusters:
-        return {"kernel": kernel, "consistent_ranking": []}
+    # --- Шаг 5–6: Упорядочивание кластеров и формирование f(A, B) ---
+    ordered_clusters = _order_clusters_by_C(C, clusters_indices)
 
-    clusters = _cluster_order(YA, YB, clusters)
+    def to_value(idx: int):
+        s = items[idx]
+        return int(s) if s.isdigit() else s
 
-    item_to_value = {i: int(items[i]) if items[i].isdigit() else items[i] for i in range(len(items))}
-    
-    consistent_ranking = []
-    for cluster in clusters:
-        cluster_values = [item_to_value[i] for i in cluster]
-        if len(cluster_values) == 1:
-            consistent_ranking.append(cluster_values[0])
+    consistent_ranking: List[Any] = []
+    for cl in ordered_clusters:
+        vals = [to_value(i) for i in cl]
+        if len(vals) == 1:
+            consistent_ranking.append(vals[0])
         else:
-            consistent_ranking.append(cluster_values)
+            consistent_ranking.append(vals)
 
     return {
         "kernel": kernel,
-        "consistent_ranking": consistent_ranking
+        "consistent_ranking": consistent_ranking,
     }
 
 
@@ -240,24 +233,24 @@ def _read_text(path: str) -> str:
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.join(script_dir, "../data/task3")
-    
+
     json_a = _read_text(os.path.join(data_dir, "Ranzhirovka-A.json"))
     json_b = _read_text(os.path.join(data_dir, "Ranzhirovka-B.json"))
     json_c = _read_text(os.path.join(data_dir, "Ranzhirovka-С.json"))
-    
-    print("СРАВНЕНИЕ РАНЖИРОВОК")
-    
-    print("\nrange_a.json vs range_b.json")
+
+    print("СРАВНЕНИЕ РАНЖИРОВОК (алгоритм согласованной кластерной ранжировки)\n")
+
+    print("Ranzhirovka-A.json vs Ranzhirovka-B.json")
     result_ab = main(json_a, json_b)
-    print(f"Ядро противоречий: {result_ab['kernel']}")
-    print(f"Согласованная ранжировка: {result_ab['consistent_ranking']}")
-    
-    print("\nrange_a.json vs range_c.json")
+    print(f"Ядро противоречий S(A,B): {result_ab['kernel']}")
+    print(f"Согласованная кластерная ранжировка f(A,B): {result_ab['consistent_ranking']}")
+
+    print("\nRanzhirovka-A.json vs Ranzhirovka-С.json")
     result_ac = main(json_a, json_c)
-    print(f"Ядро противоречий: {result_ac['kernel']}")
-    print(f"Согласованная ранжировка: {result_ac['consistent_ranking']}")
-    
-    print("\nrange_b.json vs range_c.json")
+    print(f"Ядро противоречий S(A,C): {result_ac['kernel']}")
+    print(f"Согласованная кластерная ранжировка f(A,C): {result_ac['consistent_ranking']}")
+
+    print("\nRanzhirovka-B.json vs Ranzhirovka-С.json")
     result_bc = main(json_b, json_c)
-    print(f"Ядро противоречий: {result_bc['kernel']}")
-    print(f"Согласованная ранжировка: {result_bc['consistent_ranking']}")
+    print(f"Ядро противоречий S(B,C): {result_bc['kernel']}")
+    print(f"Согласованная кластерная ранжировка f(B,C): {result_bc['consistent_ranking']}")
