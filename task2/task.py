@@ -1,166 +1,131 @@
-from collections import defaultdict, deque
-from typing import List, Tuple
-import argparse
-import math
 import os
-import sys
+import numpy as np
+import math
+from typing import Tuple, List
 
 
-def _relations_matrices(csv_str: str, root: str) -> Tuple[List[str], List[List[List[bool]]]]:
-    text = (csv_str or "").strip()
-    edges = []
-    if text:
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            a, b = [x.strip() for x in line.split(",")]
-            if not a or not b:
-                raise ValueError(f"Bad edge line: {line!r}")
-            edges.append((a, b))
+def compute_entropy(matrices: List[np.ndarray]) -> Tuple[float, float]:
+    n = matrices[0].shape[0]
+    k = len(matrices)
 
-    children = defaultdict(list)
-    parent = {}
+    total_entropy = 0.0
 
-    for u, v in edges:
-        children[u].append(v)
-        if v in parent and parent[v] != u:
-            raise ValueError(f"Node {v!r} has multiple parents")
-        parent[v] = u
-
-    reachable = {root}
-    q = deque([root])
-    while q:
-        x = q.popleft()
-        for y in children.get(x, []):
-            if y not in reachable:
-                reachable.add(y)
-                q.append(y)
-
-    children2 = {}
-    parent2 = {}
-    for u in reachable:
-        kids = [v for v in children.get(u, []) if v in reachable]
-        if kids:
-            kids.sort()
-            children2[u] = kids
-            for v in kids:
-                parent2[v] = u
-
-    nodes = []
-    q = deque([root])
-    seen = {root}
-    while q:
-        x = q.popleft()
-        nodes.append(x)
-        for y in children2.get(x, []):
-            if y not in seen:
-                seen.add(y)
-                q.append(y)
-    for v in sorted(reachable):
-        if v not in seen:
-            nodes.append(v)
-
-    n = len(nodes)
-    pos = {v: i for i, v in enumerate(nodes)}
-
-    def mat():
-        return [[False] * n for _ in range(n)]
-
-    r1, r2, r3, r4, r5 = mat(), mat(), mat(), mat(), mat()
-
-    for u, kids in children2.items():
-        iu = pos[u]
-        for v in kids:
-            iv = pos[v]
-            r1[iu][iv] = True
-            r2[iv][iu] = True
-
-    for v in nodes:
-        iv = pos[v]
-        cur = v
-        dist = 0
-        while cur in parent2:
-            cur = parent2[cur]
-            dist += 1
-            if dist >= 2:
-                ia = pos[cur]
-                r3[ia][iv] = True
-                r4[iv][ia] = True
-
-    by_parent = defaultdict(list)
-    for v in nodes:
-        if v in parent2:
-            by_parent[parent2[v]].append(v)
-
-    for kids in by_parent.values():
-        kids.sort()
-        for i in range(len(kids)):
-            ai = pos[kids[i]]
-            for j in range(len(kids)):
+    for matrix in matrices:
+        for i in range(n):
+            for j in range(n):
                 if i != j:
-                    r5[ai][pos[kids[j]]] = True
+                    p_ij = matrix[i, j] / (n - 1)
+                    if p_ij > 0:
+                        total_entropy += p_ij * math.log2(p_ij)
 
-    return nodes, [r1, r2, r3, r4, r5]
+    H = -total_entropy
+
+    H_max = (1 / math.e) * n * k
+    h = H / H_max if H_max > 0 else 0
+
+    return H, h
 
 
-def _entropy_from_matrices(mats: List[List[List[bool]]]) -> float:
-    n = len(mats[0])
-    if n <= 1:
-        return 0.0
+def generate_all_edge_permutations(edges: List[Tuple[str, str]], vertices: List[str]) -> List[List[Tuple[str, str]]]:
+    n = len(vertices)
+    all_possible_edges = []
 
-    denom = n - 1
-    total = 0.0
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                all_possible_edges.append((vertices[i], vertices[j]))
 
-    for j in range(n):
-        for mat in mats:
-            lij = 0
-            row = mat[j]
-            for x in row:
-                if x:
-                    lij += 1
-            if lij == 0:
-                continue
-            p = lij / denom
-            total += -p * math.log(p, 2)
+    existing_edges_set = set(edges)
+    possible_new_edges = [edge for edge in all_possible_edges if edge not in existing_edges_set]
 
-    return total
+    permutations = []
+
+    for remove_idx in range(len(edges)):
+        for new_edge in possible_new_edges:
+            new_edges = edges.copy()
+            new_edges[remove_idx] = new_edge
+            permutations.append(new_edges)
+
+    return permutations
 
 
 def main(s: str, e: str) -> Tuple[float, float]:
-    root = (e or "").strip()
-    if not root:
-        raise ValueError("Empty root id")
+    lines = s.strip().split('\n')
+    edges = []
+    verts = set()
 
-    nodes, mats = _relations_matrices(s, root)
-    n = len(nodes)
-    k = 5
+    for line in lines:
+        if line.strip():
+            v1, v2 = line.split(',')
+            v1 = v1.strip()
+            v2 = v2.strip()
+            verts.add(v1)
+            verts.add(v2)
+            edges.append((v1, v2))
 
-    h = _entropy_from_matrices(mats)
+    other_verts = sorted(v for v in verts if v != e)
+    vertices = [e] + other_verts
+    n = len(vertices)
+    vert_index = {v: i for i, v in enumerate(vertices)}
 
-    c = 1.0 / (math.e * math.log(2.0))
-    href = c * n * k
-    hn = 0.0 if href == 0.0 else (h / href)
+    all_permutations = generate_all_edge_permutations(edges, vertices)
 
-    return round(h, 1), round(hn, 1)
+    best_H = -float('inf')
+    best_h = 0
+    best_edges = None
 
+    for perm_edges in all_permutations:
+        adj = np.zeros((n, n), dtype=bool)
+        for v1, v2 in perm_edges:
+            i = vert_index[v1]
+            j = vert_index[v2]
+            adj[i, j] = True
 
-def _read_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+        r1_np = adj.astype(int)
+        r2_np = r1_np.T
 
+        tranzitive_r = adj.copy()
+        for _ in range(1, n):
+            tranzitive_r = tranzitive_r | (tranzitive_r @ adj)
 
-def _parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--csv", dest="csv_path", default=None)
-    p.add_argument("--root", dest="root", default="1")
-    return p.parse_args(argv)
+        r3_np = (tranzitive_r & ~adj).astype(int)
+        r4_np = r3_np.T
+
+        r2_bool = r2_np.astype(bool)
+        r5_np = np.zeros((n, n), dtype=int)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if np.any(r2_bool[i] & r2_bool[j]):
+                    r5_np[i, j] = 1
+                    r5_np[j, i] = 1
+
+        matrices = [r1_np, r2_np, r3_np, r4_np, r5_np]
+
+        H, h_val = compute_entropy(matrices)
+
+        if H > best_H:
+            best_H = H
+            best_h = h_val
+            best_edges = perm_edges.copy()
+
+    if best_edges:
+        print(f"\nЛучший вариант перестановки:")
+        print(f"Исходные рёбра: {edges}")
+        print(f"Новые рёбра: {best_edges}")
+
+    return best_H, best_h
 
 
 if __name__ == "__main__":
-    args = _parse_args(sys.argv[1:])
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = args.csv_path or os.path.join(script_dir, "../data/task2/test.csv")
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(current_dir, "../data/task2/test.csv")
 
-    csv_content = _read_text(csv_path)
-    print(main(csv_content, args.root))
+    with open(csv_path, "r") as file:
+        input_data = file.read()
+
+    eroot = input("Введите значение корневой вершины: ").strip()
+    H, h = main(input_data, eroot)
+
+    print(f"\nРезультат:")
+    print(f"H(M,R) = {H:.4f}")
+    print(f"h(M,R) = {h:.4f}")
